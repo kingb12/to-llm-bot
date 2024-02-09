@@ -101,6 +101,24 @@ Now complete the following example:
 {}
 Domain:""", args_order=["history", "utterance"])
 
+multiwoz_zero_shot_domain_prompt = SimpleTemplatePrompt(template="""
+Determine which domain is considered in the following dialogue situation.
+Choose one domain from this list:
+ - restaurant
+ - hotel
+ - attraction
+ - taxi
+ - train
+Answer with only one word, the selected domain from the list.
+You have to always select the closest possible domain.
+Consider the last domain mentioned, so focus mainly on the last utterance.
+
+-------------------
+Complete the following example:
+{}
+{}
+Domain:""", args_order=["history", "utterance"])
+
 """
 ######################
 FEW SHOT

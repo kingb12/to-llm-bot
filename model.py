@@ -99,7 +99,7 @@ class ZeroShotOpenAIChatLLM(ZeroShotOpenAILLM):
                 temperature=0,
                 )
             return completion.choices[0].message["content"]
-        except:
+        except BaseException as e:
             return ""
 
 

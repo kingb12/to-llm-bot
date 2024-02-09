@@ -1,5 +1,5 @@
 langchain
-openai
+openai==0.27.8
 numpy
 datasets
 fuzzywuzzy
@@ -19,3 +19,5 @@ pynvml
 wandb
 bitsandbytes
 accelerate
+sacrebleu==2.4.0
+bert_score==0.3.13

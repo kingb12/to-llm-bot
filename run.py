@@ -4,8 +4,6 @@ import json
 import tqdm
 from collections import Counter
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
-from pynvml import *
-from datasets import load_dataset
 import wandb
 import logging
 import transformers
@@ -85,9 +83,13 @@ if __name__ == "__main__":
     else:
         model_name = 'GPT3.5'
     if args.from_wandb_id is None:
-        wandb.init(project='llmbot', entity='hlava', config=config, settings=wandb.Settings(start_method="fork"))
+        wandb.init(project='llmbot', entity='kingb12', config=config, settings=wandb.Settings(start_method="fork"))
         wandb.run.name = f'{args.run_name}-{args.dataset}-{model_name}-examples-{args.num_examples}-ctx-{args.context_size}'
-        report_table = wandb.Table(columns=['id', 'context', 'raw_state', 'parsed_state', 'response', 'predicted_domain', 'domain'])
+        report_table = wandb.Table(
+            columns=['id', 'context', 'raw_state', 'parsed_state',
+                     'filled_domain_prompt', 'filled_state_prompt', 'filled_resp_prompt', # kingb12: I added these 3
+                     'response', 'predicted_domain', 'domain']
+        )
         wandb_run = None
 
         if args.model_name.startswith("text-"):
@@ -124,7 +126,7 @@ if __name__ == "__main__":
             domain_model = SimplePromptedLLM(model_w, tokenizer, type="seq2seq")
 
     else:
-        wandb_run = wandb.init(project="llmbot", entity='hlava', id=args.from_wandb_id)
+        wandb_run = wandb.init(project="llmbot", entity='kingb12', id=args.from_wandb_id)
     with open(args.faiss_db, 'rb') as f:
         faiss_vs = pickle.load(f)
     with open(args.ontology, 'r') as f:
@@ -220,7 +222,9 @@ if __name__ == "__main__":
             retrieve_history = history + ["Customer: " + question]
             retrieved_examples = example_retriever.retrieve("\n".join(retrieve_history[-args.context_size:]), k=20)
             retrieved_domains = [example['domain'] for example in retrieved_examples]
-            selected_domain, dp = domain_model(domain_prompt, predict=True, history="\n".join(history[-2:]), utterance=F"Customer: {question.strip()}")
+            selected_domain, filled_domain_prompt = domain_model(
+                domain_prompt, predict=True, history="\n".join(history[-2:]), utterance=F"Customer: {question.strip()}"
+            )
             if args.dataset == 'multiwoz':
                 available_domains = list(MW_FEW_SHOT_DOMAIN_DEFINITIONS.keys())
             else:
@@ -354,7 +358,9 @@ if __name__ == "__main__":
             print(f"Gold Response: {gold_response}", flush=True)
 
             history.append("Customer: " + question)
-            report_table.add_data(f"{dialogue_id}-{tn}", " ".join(history), state, json.dumps(final_state), response, selected_domain, gt_domain)
+            report_table.add_data(f"{dialogue_id}-{tn}", " ".join(history), state, json.dumps(final_state),
+                                  filled_domain_prompt, filled_state_prompt, filled_prompt,
+                                  response, selected_domain, gt_domain)
             history.append("Assistant: " + gold_response)
             
             results[dialogue_id].append({
