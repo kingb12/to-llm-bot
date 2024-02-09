@@ -1,6 +1,8 @@
 import argparse
 import pickle
 import json
+from typing import Optional
+
 import tqdm
 from collections import Counter
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
@@ -21,7 +23,9 @@ from model import (
     )
 from loaders import load_mwoz, load_sgd
 from delex import prepareSlotValuesIndependent, delexicalise, delexicaliseReferenceNumber
-from definitions import MW_FEW_SHOT_DOMAIN_DEFINITIONS, MW_ZERO_SHOT_DOMAIN_DEFINITIONS, SGD_FEW_SHOT_DOMAIN_DEFINITIONS, SGD_ZERO_SHOT_DOMAIN_DEFINITIONS, multiwoz_domain_prompt, sgd_domain_prompt
+from definitions import MW_FEW_SHOT_DOMAIN_DEFINITIONS, MW_ZERO_SHOT_DOMAIN_DEFINITIONS, \
+    SGD_FEW_SHOT_DOMAIN_DEFINITIONS, SGD_ZERO_SHOT_DOMAIN_DEFINITIONS, multiwoz_domain_prompt, sgd_domain_prompt, \
+    multiwoz_zero_shot_domain_prompt
 
 from database import MultiWOZDatabase
 from utils import parse_state, ExampleRetriever, ExampleFormatter, print_gpu_utilization, SGDEvaluator
@@ -76,12 +80,14 @@ if __name__ == "__main__":
         model_name = 'opt-iml-30b'
     elif 'NeoXT' in args.model_name:
         model_name = 'GPT-NeoXT-20b'
-    elif 'gpt-3.5' in args.model_name:
+    elif 'gpt-3.5' in args.model_name or 'gpt-4' in args.model_name:
         model_name = 'ChatGPT'
     elif args.model_name == 'alpaca':
         model_name = 'Alpaca-LoRA'
     else:
         model_name = 'GPT3.5'
+    # setting a top-level flag on whether to use ANY examples, to prevent fetching them when not needed
+    retrieve_examples: bool = not args.use_zero_shot
     if args.from_wandb_id is None:
         wandb.init(project='llmbot', entity='kingb12', config=config, settings=wandb.Settings(start_method="fork"))
         wandb.run.name = f'{args.run_name}-{args.dataset}-{model_name}-examples-{args.num_examples}-ctx-{args.context_size}'
@@ -132,7 +138,7 @@ if __name__ == "__main__":
     with open(args.ontology, 'r') as f:
         ontology = json.load(f)
     if args.dataset == 'multiwoz':
-        domain_prompt = multiwoz_domain_prompt
+        domain_prompt = multiwoz_domain_prompt if not args.use_zero_shot else multiwoz_zero_shot_domain_prompt
         database = MultiWOZDatabase(args.database_path)
         state_vs = faiss_vs
         #with open('multiwoz-state-update-1turn-only-ctx2.vec', 'rb') as f:
@@ -142,9 +148,13 @@ if __name__ == "__main__":
         domain_prompt = sgd_domain_prompt
         state_vs = faiss_vs
         delex_dic = None
-    example_retriever = ExampleRetriever(faiss_vs)
-    state_retriever = ExampleRetriever(state_vs)
-    example_formatter = ExampleFormatter(ontology=ontology)
+    example_retriever: Optional[ExampleRetriever] = None
+    state_retriever: Optional[ExampleRetriever] = None
+    example_formatter: Optional[ExampleFormatter] = None
+    if retrieve_examples:
+        example_retriever = ExampleRetriever(faiss_vs)
+        state_retriever = ExampleRetriever(state_vs)
+        example_formatter = ExampleFormatter(ontology=ontology)
 
     history = []
     n = 0
@@ -220,8 +230,11 @@ if __name__ == "__main__":
                     else:
                         new_gt_state[domain][sl] = val
             retrieve_history = history + ["Customer: " + question]
-            retrieved_examples = example_retriever.retrieve("\n".join(retrieve_history[-args.context_size:]), k=20)
-            retrieved_domains = [example['domain'] for example in retrieved_examples]
+            retrieved_examples: Optional[list] = []
+            retrieved_domains: Optional[list] = []
+            if retrieve_examples:
+                retrieved_examples = example_retriever.retrieve("\n".join(retrieve_history[-args.context_size:]), k=20)
+                retrieved_domains = [example['domain'] for example in retrieved_examples]
             selected_domain, filled_domain_prompt = domain_model(
                 domain_prompt, predict=True, history="\n".join(history[-2:]), utterance=F"Customer: {question.strip()}"
             )
@@ -236,7 +249,7 @@ if __name__ == "__main__":
                 domain_definition = MW_ZERO_SHOT_DOMAIN_DEFINITIONS[selected_domain] if args.use_zero_shot else MW_FEW_SHOT_DOMAIN_DEFINITIONS[selected_domain]
             else:
                 domain_definition = SGD_ZERO_SHOT_DOMAIN_DEFINITIONS[selected_domain] if args.use_zero_shot else SGD_FEW_SHOT_DOMAIN_DEFINITIONS[selected_domain]
-            most_common_domain = Counter(retrieved_domains).most_common(1)[0][0]
+            most_common_domain = Counter(retrieved_domains).most_common(1)[0][0] if retrieved_domains else None
             if args.use_gt_domain:
                 selected_domain = gt_domain
             if previous_domain != selected_domain:
@@ -248,20 +261,29 @@ if __name__ == "__main__":
             retrieved_examples = [example for example in retrieved_examples if example['domain'] == selected_domain]
             num_examples = min(len(retrieved_examples), args.num_examples)
             num_state_examples = 5
-            state_examples = [example for example in state_retriever.retrieve("\n".join(retrieve_history[-args.context_size:]), k=20) if example['domain'] == selected_domain][:num_state_examples]
-            positive_state_examples = example_formatter.format(state_examples[:num_state_examples],
-                                                               input_keys=["context"],
-                                                               output_keys=["state"],
-                                                               )
-                                                               #use_json=True)
-            negative_state_examples = example_formatter.format(state_examples[:num_state_examples],
-                                                               input_keys=["context"],
-                                                               output_keys=["state"],
-                                                               corrupt_state=True)
-            response_examples = example_formatter.format(retrieved_examples[:num_examples],
-                                                         input_keys=["context", "full_state", "database"],
-                                                         output_keys=["response"],
-                                                         use_json=True)
+            state_examples: Optional[list] = []
+            positive_state_examples: Optional[list] = []
+            negative_state_examples: Optional[list] = []
+            response_examples: Optional[list] = []
+            if retrieve_examples:
+                state_examples = [
+                                     example for example in
+                                     state_retriever.retrieve("\n".join(retrieve_history[-args.context_size:]), k=20)
+                                     if example['domain'] == selected_domain
+                ][:num_state_examples]
+                positive_state_examples = example_formatter.format(state_examples[:num_state_examples],
+                                                                   input_keys=["context"],
+                                                                   output_keys=["state"],
+                                                                   )
+                                                                   #use_json=True)
+                negative_state_examples = example_formatter.format(state_examples[:num_state_examples],
+                                                                   input_keys=["context"],
+                                                                   output_keys=["state"],
+                                                                   corrupt_state=True)
+                response_examples = example_formatter.format(retrieved_examples[:num_examples],
+                                                             input_keys=["context", "full_state", "database"],
+                                                             output_keys=["response"],
+                                                             use_json=True)
             
             state_prompt = domain_definition.state_prompt
             response_prompt = domain_definition.response_prompt
@@ -275,7 +297,7 @@ if __name__ == "__main__":
                         "history": "\n".join(history),
                         "utterance": question.strip()
                     }
-                    if not args.use_zero_shot:
+                    if retrieve_examples and not args.use_zero_shot:
                         kwargs["positive_examples"] = positive_state_examples
                         kwargs["negative_examples"] = [] # negative_state_examples
                     state, filled_state_prompt = model(state_prompt, predict=True, **kwargs)
@@ -338,7 +360,7 @@ if __name__ == "__main__":
                     "state": json.dumps(total_state), #.replace("{", '<').replace("}", '>'),
                     "database": str(database_results)
                 }
-                if not args.use_zero_shot:
+                if retrieve_examples and not args.use_zero_shot:
                     kwargs["positive_examples"] = response_examples
                     kwargs["negative_examples"] = []
 
@@ -383,6 +405,11 @@ if __name__ == "__main__":
     if args.dataset == 'multiwoz':
         evaluator = MWEvaluator(bleu=True, success=True, richness=True, jga=True, dst=True)
         eval_results = evaluator.evaluate(results)
+        with open(args.output, 'w') as f:
+            json.dump(results, f)
+        artifact: wandb.Artifact = wandb.Artifact(f"results-for-eval", type="eval_input")
+        artifact.add_file(args.output)
+        wandb.log_artifact(artifact)
         print(eval_results)
         for metric, values in eval_results.items():
             if values is not None:
